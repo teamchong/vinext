@@ -414,7 +414,7 @@ async function renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, req
     }
   }
   const resolvedMetadata = metadataList.length > 0 ? mergeMetadata(metadataList) : null;
-  const resolvedViewport = viewportList.length > 0 ? mergeViewport(viewportList) : null;
+  const resolvedViewport = mergeViewport(viewportList);
 
   // Build element: metadata head + noindex meta + boundary component wrapped in layouts
   // Always include charset and default viewport for parity with Next.js.
@@ -422,8 +422,7 @@ async function renderHTTPAccessFallbackPage(route, statusCode, isRscRequest, req
   const noindexMeta = createElement("meta", { name: "robots", content: "noindex" });
   const headElements = [charsetMeta, noindexMeta];
   if (resolvedMetadata) headElements.push(createElement(MetadataHead, { metadata: resolvedMetadata }));
-  const effectiveViewport = resolvedViewport ?? { width: "device-width", initialScale: 1 };
-  headElements.push(createElement(ViewportHead, { viewport: effectiveViewport }));
+  headElements.push(createElement(ViewportHead, { viewport: resolvedViewport }));
   let element = createElement(Fragment, null, ...headElements, createElement(BoundaryComponent));
   if (isRscRequest) {
     // For RSC requests (client-side navigation), wrap the element with the same
@@ -688,7 +687,7 @@ async function buildPageElement(route, params, opts, searchParams) {
     if (pageVp) viewportList.push(pageVp);
   }
   const resolvedMetadata = metadataList.length > 0 ? mergeMetadata(metadataList) : null;
-  const resolvedViewport = viewportList.length > 0 ? mergeViewport(viewportList) : null;
+  const resolvedViewport = mergeViewport(viewportList);
 
   // Build nested layout tree from outermost to innermost.
   // Next.js 16 passes params/searchParams as Promises (async pattern)
@@ -729,9 +728,7 @@ async function buildPageElement(route, params, opts, searchParams) {
     // Always emit <meta charset="utf-8"> — Next.js includes this on every page
     headElements.push(createElement("meta", { charSet: "utf-8" }));
     if (resolvedMetadata) headElements.push(createElement(MetadataHead, { metadata: resolvedMetadata }));
-    // Default viewport to standard responsive settings when none is exported
-    const effectiveViewport = resolvedViewport ?? { width: "device-width", initialScale: 1 };
-    headElements.push(createElement(ViewportHead, { viewport: effectiveViewport }));
+    headElements.push(createElement(ViewportHead, { viewport: resolvedViewport }));
     element = createElement(Fragment, null, ...headElements, element);
   }
 
