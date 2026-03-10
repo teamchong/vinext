@@ -8044,12 +8044,124 @@ describe("handleImageOptimization", () => {
 });
 
 describe("next/navigation enhancements", () => {
-  it("exports ReadonlyURLSearchParams type alias", async () => {
-    // This is a type-only export, we verify the module loads without error
+  it("exports ReadonlyURLSearchParams runtime class", async () => {
     const nav = await import("../packages/vinext/src/shims/navigation.js");
-    // ReadonlyURLSearchParams is a type export, not a runtime value
-    // But useServerInsertedHTML should be exported
+    expect(typeof nav.ReadonlyURLSearchParams).toBe("function");
     expect(typeof nav.useServerInsertedHTML).toBe("function");
+  });
+
+  it("ReadonlyURLSearchParams preserves reads and blocks mutation methods", async () => {
+    const { ReadonlyURLSearchParams } = await import("../packages/vinext/src/shims/navigation.js");
+
+    const searchParams = new ReadonlyURLSearchParams("foo=bar&foo=baz&zap=zazzle");
+
+    expect(searchParams).toBeInstanceOf(URLSearchParams);
+    expect(searchParams).toBeInstanceOf(ReadonlyURLSearchParams);
+    expect(searchParams.get("foo")).toBe("bar");
+    expect(searchParams.getAll("foo")).toEqual(["bar", "baz"]);
+    expect(searchParams.toString()).toBe("foo=bar&foo=baz&zap=zazzle");
+    expect(() => searchParams.append("x", "1")).toThrow(
+      "Method unavailable on `ReadonlyURLSearchParams`.",
+    );
+    expect(() => searchParams.delete("foo")).toThrow(
+      "Method unavailable on `ReadonlyURLSearchParams`.",
+    );
+    expect(() => searchParams.set("foo", "qux")).toThrow(
+      "Method unavailable on `ReadonlyURLSearchParams`.",
+    );
+    expect(() => searchParams.sort()).toThrow("Method unavailable on `ReadonlyURLSearchParams`.");
+    expect(searchParams.toString()).toBe("foo=bar&foo=baz&zap=zazzle");
+  });
+
+  it("useSearchParams returns a readonly wrapper on the server path", async () => {
+    const { ReadonlyURLSearchParams, setNavigationContext, useSearchParams } =
+      await import("../packages/vinext/src/shims/navigation.js");
+
+    try {
+      setNavigationContext({
+        pathname: "/readonly-test",
+        searchParams: new URLSearchParams("foo=bar&foo=baz"),
+        params: {},
+      });
+
+      const searchParams = useSearchParams();
+
+      expect(searchParams).toBeInstanceOf(ReadonlyURLSearchParams);
+      expect(searchParams.getAll("foo")).toEqual(["bar", "baz"]);
+      expect(() => searchParams.set("foo", "qux")).toThrow(
+        "Method unavailable on `ReadonlyURLSearchParams`.",
+      );
+    } finally {
+      setNavigationContext(null);
+    }
+  });
+
+  it("useSearchParams reuses the same readonly wrapper for the same server context", async () => {
+    const { setNavigationContext, useSearchParams } =
+      await import("../packages/vinext/src/shims/navigation.js");
+
+    try {
+      const ctx = {
+        pathname: "/readonly-test",
+        searchParams: new URLSearchParams("foo=bar"),
+        params: {},
+      };
+
+      setNavigationContext(ctx);
+
+      const first = useSearchParams();
+      const second = useSearchParams();
+
+      expect(first).toBe(second);
+    } finally {
+      setNavigationContext(null);
+    }
+  });
+
+  it("useSearchParams keeps wrapper identity stable across concurrent ALS-scoped requests", async () => {
+    const { runWithNavigationContext } =
+      await import("../packages/vinext/src/shims/navigation-state.js");
+    const { setNavigationContext, useSearchParams } =
+      await import("../packages/vinext/src/shims/navigation.js");
+
+    let releaseInterleave!: () => void;
+    const waitForInterleave = new Promise<void>((resolve) => {
+      releaseInterleave = resolve;
+    });
+
+    async function runRequest(query: string, pathname: string) {
+      return runWithNavigationContext(async () => {
+        setNavigationContext({
+          pathname,
+          searchParams: new URLSearchParams(query),
+          params: {},
+        });
+
+        const first = useSearchParams();
+        await waitForInterleave;
+        const second = useSearchParams();
+
+        return {
+          first,
+          second,
+          value: first.toString(),
+        };
+      });
+    }
+
+    const requestA = runRequest("a=1", "/request-a");
+    const requestB = runRequest("b=2", "/request-b");
+
+    await Promise.resolve();
+    releaseInterleave();
+
+    const [a, b] = await Promise.all([requestA, requestB]);
+
+    expect(a.first).toBe(a.second);
+    expect(b.first).toBe(b.second);
+    expect(a.value).toBe("a=1");
+    expect(b.value).toBe("b=2");
+    expect(a.first).not.toBe(b.first);
   });
 
   it("useServerInsertedHTML is a no-op function", async () => {
