@@ -1943,16 +1943,39 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
     }
     const hasDefault = typeof handler["default"] === "function";
 
+    // Route handlers need the same middleware header/status merge behavior as
+    // page responses. This keeps middleware response headers visible on API
+    // routes in Workers/dev, and preserves custom rewrite status overrides.
+    function attachRouteHandlerMiddlewareContext(response) {
+      // _mwCtx.headers is only set (non-null) when middleware actually ran and
+      // produced a continue/rewrite response. An empty Headers object (middleware
+      // ran but produced no response headers) is a harmless edge case: the early
+      // return is skipped, but the copy loop below is a no-op, so no incorrect
+      // headers are added. The allocation cost in that case is acceptable.
+      if (!_mwCtx.headers && _mwCtx.status == null) return response;
+      const responseHeaders = new Headers(response.headers);
+      if (_mwCtx.headers) {
+        for (const [key, value] of _mwCtx.headers) {
+          responseHeaders.append(key, value);
+        }
+      }
+      return new Response(response.body, {
+        status: _mwCtx.status ?? response.status,
+        statusText: response.statusText,
+        headers: responseHeaders,
+      });
+    }
+
     // OPTIONS auto-implementation: respond with Allow header and 204
     if (method === "OPTIONS" && typeof handler["OPTIONS"] !== "function") {
       const allowMethods = hasDefault ? HTTP_METHODS : exportedMethods;
       if (!allowMethods.includes("OPTIONS")) allowMethods.push("OPTIONS");
       setHeadersContext(null);
       setNavigationContext(null);
-      return new Response(null, {
+      return attachRouteHandlerMiddlewareContext(new Response(null, {
         status: 204,
         headers: { "Allow": allowMethods.join(", ") },
-      });
+      }));
     }
 
     // HEAD auto-implementation: run GET handler and strip body
@@ -1996,28 +2019,28 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
           if (draftCookie) newHeaders.append("Set-Cookie", draftCookie);
 
           if (isAutoHead) {
-            return new Response(null, {
+            return attachRouteHandlerMiddlewareContext(new Response(null, {
               status: response.status,
               statusText: response.statusText,
               headers: newHeaders,
-            });
+            }));
           }
-          return new Response(response.body, {
+          return attachRouteHandlerMiddlewareContext(new Response(response.body, {
             status: response.status,
             statusText: response.statusText,
             headers: newHeaders,
-          });
+          }));
         }
 
         if (isAutoHead) {
           // Strip body for auto-HEAD, preserve headers and status
-          return new Response(null, {
+          return attachRouteHandlerMiddlewareContext(new Response(null, {
             status: response.status,
             statusText: response.statusText,
             headers: response.headers,
-          });
+          }));
         }
-        return response;
+        return attachRouteHandlerMiddlewareContext(response);
       } catch (err) {
         getAndClearPendingCookies(); // Clear any pending cookies on error
         // Catch redirect() / notFound() thrown from route handlers
@@ -2029,16 +2052,16 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
             const statusCode = parts[3] ? parseInt(parts[3], 10) : 307;
             setHeadersContext(null);
             setNavigationContext(null);
-            return new Response(null, {
+            return attachRouteHandlerMiddlewareContext(new Response(null, {
               status: statusCode,
               headers: { Location: new URL(redirectUrl, request.url).toString() },
-            });
+            }));
           }
           if (digest === "NEXT_NOT_FOUND" || digest.startsWith("NEXT_HTTP_ERROR_FALLBACK;")) {
             const statusCode = digest === "NEXT_NOT_FOUND" ? 404 : parseInt(digest.split(";")[1], 10);
             setHeadersContext(null);
             setNavigationContext(null);
-            return new Response(null, { status: statusCode });
+            return attachRouteHandlerMiddlewareContext(new Response(null, { status: statusCode }));
           }
         }
         setHeadersContext(null);
@@ -2051,17 +2074,17 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
         ).catch((reportErr) => {
           console.error("[vinext] Failed to report route handler error:", reportErr);
         });
-        return new Response(null, { status: 500 });
+        return attachRouteHandlerMiddlewareContext(new Response(null, { status: 500 }));
       } finally {
         setHeadersAccessPhase(previousHeadersPhase);
       }
     }
     setHeadersContext(null);
     setNavigationContext(null);
-    return new Response(null, {
+    return attachRouteHandlerMiddlewareContext(new Response(null, {
       status: 405,
       headers: { Allow: exportedMethods.join(", ") },
-    });
+    }));
   }
 
   // Build the component tree: layouts wrapping the page
