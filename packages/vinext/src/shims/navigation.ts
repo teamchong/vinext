@@ -21,8 +21,16 @@ import { ReadonlyURLSearchParams } from "./readonly-url-search-params.js";
 // (including route groups, with dynamic params resolved to actual values).
 // Created lazily because `React.createContext` is NOT available in the
 // react-server condition of React. In the RSC environment, this remains null.
-
-let _LayoutSegmentCtx: React.Context<string[]> | null = null;
+// The shared context lives behind a global singleton so provider/hook pairs
+// still line up if Vite loads this shim through multiple resolved module IDs.
+const _LAYOUT_SEGMENT_CTX_KEY = Symbol.for("vinext.layoutSegmentContext");
+const _SERVER_INSERTED_HTML_CTX_KEY = Symbol.for("vinext.serverInsertedHTMLContext");
+type _LayoutSegmentGlobal = typeof globalThis & {
+  [_LAYOUT_SEGMENT_CTX_KEY]?: React.Context<string[]> | null;
+  [_SERVER_INSERTED_HTML_CTX_KEY]?: React.Context<
+    ((callback: () => unknown) => void) | null
+  > | null;
+};
 
 // ─── ServerInsertedHTML context ────────────────────────────────────────────────
 // Used by CSS-in-JS libraries (Apollo Client, styled-components, emotion) to
@@ -38,22 +46,38 @@ let _LayoutSegmentCtx: React.Context<string[]> | null = null;
 // Created eagerly at module load time. In the RSC environment (react-server
 // condition), createContext isn't available so this will be null.
 
+function getServerInsertedHTMLContext(): React.Context<
+  ((callback: () => unknown) => void) | null
+> | null {
+  if (typeof React.createContext !== "function") return null;
+
+  const globalState = globalThis as _LayoutSegmentGlobal;
+  if (!globalState[_SERVER_INSERTED_HTML_CTX_KEY]) {
+    globalState[_SERVER_INSERTED_HTML_CTX_KEY] = React.createContext<
+      ((callback: () => unknown) => void) | null
+    >(null);
+  }
+
+  return globalState[_SERVER_INSERTED_HTML_CTX_KEY] ?? null;
+}
+
 export const ServerInsertedHTMLContext: React.Context<
   ((callback: () => unknown) => void) | null
-> | null =
-  typeof React.createContext === "function"
-    ? React.createContext<((callback: () => unknown) => void) | null>(null)
-    : null;
+> | null = getServerInsertedHTMLContext();
 
 /**
  * Get or create the layout segment context.
  * Returns null in the RSC environment (createContext unavailable).
  */
 export function getLayoutSegmentContext(): React.Context<string[]> | null {
-  if (_LayoutSegmentCtx === null && typeof React.createContext === "function") {
-    _LayoutSegmentCtx = React.createContext<string[]>([]);
+  if (typeof React.createContext !== "function") return null;
+
+  const globalState = globalThis as _LayoutSegmentGlobal;
+  if (!globalState[_LAYOUT_SEGMENT_CTX_KEY]) {
+    globalState[_LAYOUT_SEGMENT_CTX_KEY] = React.createContext<string[]>([]);
   }
-  return _LayoutSegmentCtx;
+
+  return globalState[_LAYOUT_SEGMENT_CTX_KEY] ?? null;
 }
 
 /**
