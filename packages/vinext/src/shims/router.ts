@@ -77,10 +77,6 @@ interface TransitionOptions {
   locale?: string;
 }
 
-// Route event handler types (used by consumers via router.events)
-type _RouteChangeHandler = (url: string) => void;
-type _RouteErrorHandler = (err: Error, url: string) => void;
-
 interface RouterEvents {
   on(event: string, handler: (...args: unknown[]) => void): void;
   off(event: string, handler: (...args: unknown[]) => void): void;
@@ -154,6 +150,20 @@ export function applyNavigationLocale(url: string, locale?: string): string {
 /** Check if a URL is external (any URL scheme per RFC 3986, or protocol-relative) */
 export function isExternalUrl(url: string): boolean {
   return /^[a-z][a-z0-9+.-]*:/i.test(url) || url.startsWith("//");
+}
+
+/** Resolve a hash URL to a basePath-stripped app URL for event payloads */
+function resolveHashUrl(url: string): string {
+  if (typeof window === "undefined") return url;
+  if (url.startsWith("#"))
+    return stripBasePath(window.location.pathname, __basePath) + window.location.search + url;
+  // Full-path hash URL — strip basePath for consistency with other events
+  try {
+    const parsed = new URL(url, window.location.href);
+    return stripBasePath(parsed.pathname, __basePath) + parsed.search + parsed.hash;
+  } catch {
+    return url;
+  }
 }
 
 /** Check if a href is only a hash change relative to the current URL */
@@ -420,7 +430,7 @@ async function navigateClient(url: string): Promise<void> {
     root.render(element);
   } catch (err) {
     console.error("[vinext] Client navigation failed:", err);
-    routerEvents.emit("routeChangeError", err, url);
+    routerEvents.emit("routeChangeError", err, url, { shallow: false });
     window.location.href = url;
   } finally {
     _navInProgress = false;
@@ -505,22 +515,32 @@ export function useRouter(): NextRouter {
 
       // Hash-only change — no page fetch needed
       if (isHashOnlyChange(resolved)) {
+        const eventUrl = resolveHashUrl(resolved);
+        routerEvents.emit("hashChangeStart", eventUrl, {
+          shallow: options?.shallow ?? false,
+        });
         const hash = resolved.includes("#") ? resolved.slice(resolved.indexOf("#")) : "";
         window.history.pushState({}, "", resolved.startsWith("#") ? resolved : full);
+        _lastPathnameAndSearch = window.location.pathname + window.location.search;
         scrollToHash(hash);
         setState(getPathnameAndQuery());
+        routerEvents.emit("hashChangeComplete", eventUrl, {
+          shallow: options?.shallow ?? false,
+        });
         window.dispatchEvent(new CustomEvent("vinext:navigate"));
         return true;
       }
 
       saveScrollPosition();
-      routerEvents.emit("routeChangeStart", resolved);
+      routerEvents.emit("routeChangeStart", resolved, { shallow: options?.shallow ?? false });
+      routerEvents.emit("beforeHistoryChange", resolved, { shallow: options?.shallow ?? false });
       window.history.pushState({}, "", full);
+      _lastPathnameAndSearch = window.location.pathname + window.location.search;
       if (!options?.shallow) {
         await navigateClient(full);
       }
       setState(getPathnameAndQuery());
-      routerEvents.emit("routeChangeComplete", resolved);
+      routerEvents.emit("routeChangeComplete", resolved, { shallow: options?.shallow ?? false });
 
       // Scroll: handle hash target, else scroll to top unless scroll:false
       const hash = resolved.includes("#") ? resolved.slice(resolved.indexOf("#")) : "";
@@ -553,21 +573,31 @@ export function useRouter(): NextRouter {
 
       // Hash-only change — no page fetch needed
       if (isHashOnlyChange(resolved)) {
+        const eventUrl = resolveHashUrl(resolved);
+        routerEvents.emit("hashChangeStart", eventUrl, {
+          shallow: options?.shallow ?? false,
+        });
         const hash = resolved.includes("#") ? resolved.slice(resolved.indexOf("#")) : "";
         window.history.replaceState({}, "", resolved.startsWith("#") ? resolved : full);
+        _lastPathnameAndSearch = window.location.pathname + window.location.search;
         scrollToHash(hash);
         setState(getPathnameAndQuery());
+        routerEvents.emit("hashChangeComplete", eventUrl, {
+          shallow: options?.shallow ?? false,
+        });
         window.dispatchEvent(new CustomEvent("vinext:navigate"));
         return true;
       }
 
-      routerEvents.emit("routeChangeStart", resolved);
+      routerEvents.emit("routeChangeStart", resolved, { shallow: options?.shallow ?? false });
+      routerEvents.emit("beforeHistoryChange", resolved, { shallow: options?.shallow ?? false });
       window.history.replaceState({}, "", full);
+      _lastPathnameAndSearch = window.location.pathname + window.location.search;
       if (!options?.shallow) {
         await navigateClient(full);
       }
       setState(getPathnameAndQuery());
-      routerEvents.emit("routeChangeComplete", resolved);
+      routerEvents.emit("routeChangeComplete", resolved, { shallow: options?.shallow ?? false });
 
       // Scroll: handle hash target, else scroll to top unless scroll:false
       const hash = resolved.includes("#") ? resolved.slice(resolved.indexOf("#")) : "";
@@ -623,6 +653,12 @@ export function useRouter(): NextRouter {
 // If it returns false, the navigation is cancelled.
 let _beforePopStateCb: BeforePopStateCallback | undefined;
 
+// Track pathname+search for detecting hash-only back/forward in the popstate
+// handler. Updated after every pushState/replaceState so that popstate can
+// compare the previous value with the (already-changed) window.location.
+let _lastPathnameAndSearch =
+  typeof window !== "undefined" ? window.location.pathname + window.location.search : "";
+
 // Module-level popstate listener: handles browser back/forward by re-rendering
 // the React root with the page at the new URL. This runs regardless of whether
 // any component calls useRouter().
@@ -630,6 +666,9 @@ if (typeof window !== "undefined") {
   window.addEventListener("popstate", (e: PopStateEvent) => {
     const browserUrl = window.location.pathname + window.location.search;
     const appUrl = stripBasePath(window.location.pathname, __basePath) + window.location.search;
+
+    // Detect hash-only back/forward: pathname+search unchanged, only hash differs.
+    const isHashOnly = browserUrl === _lastPathnameAndSearch;
 
     // Check beforePopState callback
     if (_beforePopStateCb !== undefined) {
@@ -641,9 +680,31 @@ if (typeof window !== "undefined") {
       if (!shouldContinue) return;
     }
 
-    routerEvents.emit("routeChangeStart", appUrl);
+    // Update tracker only after beforePopState confirms navigation proceeds.
+    // If beforePopState cancels, the tracker must retain the previous value
+    // so the next popstate compares against the correct baseline.
+    _lastPathnameAndSearch = browserUrl;
+
+    if (isHashOnly) {
+      // Hash-only back/forward — no page fetch needed
+      const hashUrl = appUrl + window.location.hash;
+      routerEvents.emit("hashChangeStart", hashUrl, { shallow: false });
+      scrollToHash(window.location.hash);
+      routerEvents.emit("hashChangeComplete", hashUrl, { shallow: false });
+      window.dispatchEvent(new CustomEvent("vinext:navigate"));
+      return;
+    }
+
+    const fullAppUrl = appUrl + window.location.hash;
+    routerEvents.emit("routeChangeStart", fullAppUrl, { shallow: false });
+    // Note: The browser has already updated window.location by the time popstate
+    // fires, so this is not truly "before" the URL change. In Next.js the popstate
+    // handler calls replaceState to store history metadata — beforeHistoryChange
+    // precedes that call, not the URL change itself. We emit it here for API
+    // compatibility.
+    routerEvents.emit("beforeHistoryChange", fullAppUrl, { shallow: false });
     void navigateClient(browserUrl).then(() => {
-      routerEvents.emit("routeChangeComplete", appUrl);
+      routerEvents.emit("routeChangeComplete", fullAppUrl, { shallow: false });
       restoreScrollPosition(e.state);
       window.dispatchEvent(new CustomEvent("vinext:navigate"));
     });
@@ -693,20 +754,30 @@ const Router = {
 
     // Hash-only change
     if (isHashOnlyChange(resolved)) {
+      const eventUrl = resolveHashUrl(resolved);
+      routerEvents.emit("hashChangeStart", eventUrl, {
+        shallow: options?.shallow ?? false,
+      });
       const hash = resolved.includes("#") ? resolved.slice(resolved.indexOf("#")) : "";
       window.history.pushState({}, "", resolved.startsWith("#") ? resolved : full);
+      _lastPathnameAndSearch = window.location.pathname + window.location.search;
       scrollToHash(hash);
+      routerEvents.emit("hashChangeComplete", eventUrl, {
+        shallow: options?.shallow ?? false,
+      });
       window.dispatchEvent(new CustomEvent("vinext:navigate"));
       return true;
     }
 
     saveScrollPosition();
-    routerEvents.emit("routeChangeStart", resolved);
+    routerEvents.emit("routeChangeStart", resolved, { shallow: options?.shallow ?? false });
+    routerEvents.emit("beforeHistoryChange", resolved, { shallow: options?.shallow ?? false });
     window.history.pushState({}, "", full);
+    _lastPathnameAndSearch = window.location.pathname + window.location.search;
     if (!options?.shallow) {
       await navigateClient(full);
     }
-    routerEvents.emit("routeChangeComplete", resolved);
+    routerEvents.emit("routeChangeComplete", resolved, { shallow: options?.shallow ?? false });
 
     const hash = resolved.includes("#") ? resolved.slice(resolved.indexOf("#")) : "";
     if (hash) {
@@ -734,19 +805,29 @@ const Router = {
 
     // Hash-only change
     if (isHashOnlyChange(resolved)) {
+      const eventUrl = resolveHashUrl(resolved);
+      routerEvents.emit("hashChangeStart", eventUrl, {
+        shallow: options?.shallow ?? false,
+      });
       const hash = resolved.includes("#") ? resolved.slice(resolved.indexOf("#")) : "";
       window.history.replaceState({}, "", resolved.startsWith("#") ? resolved : full);
+      _lastPathnameAndSearch = window.location.pathname + window.location.search;
       scrollToHash(hash);
+      routerEvents.emit("hashChangeComplete", eventUrl, {
+        shallow: options?.shallow ?? false,
+      });
       window.dispatchEvent(new CustomEvent("vinext:navigate"));
       return true;
     }
 
-    routerEvents.emit("routeChangeStart", resolved);
+    routerEvents.emit("routeChangeStart", resolved, { shallow: options?.shallow ?? false });
+    routerEvents.emit("beforeHistoryChange", resolved, { shallow: options?.shallow ?? false });
     window.history.replaceState({}, "", full);
+    _lastPathnameAndSearch = window.location.pathname + window.location.search;
     if (!options?.shallow) {
       await navigateClient(full);
     }
-    routerEvents.emit("routeChangeComplete", resolved);
+    routerEvents.emit("routeChangeComplete", resolved, { shallow: options?.shallow ?? false });
 
     const hash = resolved.includes("#") ? resolved.slice(resolved.indexOf("#")) : "";
     if (hash) {
